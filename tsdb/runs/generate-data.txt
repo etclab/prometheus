@@ -1,0 +1,7 @@
+=== RUN   TestGenerateScratchData
+    scratch_data_gen_test.go:207: wrote 2 series x 2 samples (seed 1) to testdata/scratch_benchdata.json; selector vendor="intel" matches 1 series
+    scratch_data_gen_test.go:215:   series[0] [matched] {__name__="cpu_usage_ratio", host="10.0.0.0", os="linux", vendor="intel"} values=[0.9069904319694293 1.4107636320675185]
+    scratch_data_gen_test.go:215:   series[1] {__name__="cpu_usage_ratio", host="10.0.0.1", os="windows", vendor="amd"} values=[0.9968400798277357 0.6565712807804702]
+--- PASS: TestGenerateScratchData (0.00s)
+PASS
+ok  	github.com/prometheus/prometheus/tsdb	0.018s

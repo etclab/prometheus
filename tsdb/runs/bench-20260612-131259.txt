@@ -1,0 +1,22 @@
+# Encrypted-search query-overhead benchmark
+# generated: 2026-06-12T13:12:59-04:00
+# dataset: 1000 series x 5000 samples/series (seed 1); selector vendor="intel" matches 334 series
+# fixture: tsdb/testdata/scratch_benchdata.json (135M)
+# server/* = keyless (untrusted Prometheus); client/* = key holder; decrypt is client-side only
+# command: go test ./tsdb -run '^$' -bench '^BenchmarkQuery(Baseline|Encrypted)$' -benchmem -benchtime=2s
+
+goos: linux
+goarch: amd64
+pkg: github.com/prometheus/prometheus/tsdb
+cpu: INTEL(R) XEON(R) GOLD 5512U
+BenchmarkQueryBaseline/index_search-56         	  352951	      6466 ns/op	    8224 B/op	      12 allocs/op
+BenchmarkQueryBaseline/retrieve_sum-56         	      12	 198286688 ns/op	 1438352 B/op	   15711 allocs/op
+BenchmarkQueryBaseline/end_to_end-56           	      12	 197649452 ns/op	 1446576 B/op	   15723 allocs/op
+BenchmarkQueryEncrypted/server/cjjjkrs_match-56         	   10000	    224603 ns/op	  255260 B/op	    2253 allocs/op
+BenchmarkQueryEncrypted/server/retrieve_sum-56          	      12	 194398360 ns/op	 1438352 B/op	   15711 allocs/op
+BenchmarkQueryEncrypted/client/gen_token-56             	 1256306	      1822 ns/op	    1728 B/op	      15 allocs/op
+BenchmarkQueryEncrypted/client/resolve_refs-56          	    7393	    331219 ns/op	  478336 B/op	    2006 allocs/op
+BenchmarkQueryEncrypted/client/timecrypt_decrypt-56     	     396	   5643658 ns/op	 7684672 B/op	   42752 allocs/op
+BenchmarkQueryEncrypted/end_to_end-56                   	      10	 204337241 ns/op	 9885068 B/op	   63071 allocs/op
+PASS
+ok  	github.com/prometheus/prometheus/tsdb	133.622s

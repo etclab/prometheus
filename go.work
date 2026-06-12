@@ -2,6 +2,8 @@ go 1.25.0
 
 use (
 	.
+	../clusion-go
+	../timecrypt-go
 	./compliance
 	./documentation/examples/remote_storage
 	./internal/tools

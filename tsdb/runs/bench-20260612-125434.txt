@@ -1,0 +1,15 @@
+goos: linux
+goarch: amd64
+pkg: github.com/prometheus/prometheus/tsdb
+cpu: INTEL(R) XEON(R) GOLD 5512U
+BenchmarkQueryBaseline/index_search-56         	19720845	       347.1 ns/op	      48 B/op	       3 allocs/op
+BenchmarkQueryBaseline/retrieve_sum-56         	 1409684	      3381 ns/op	     944 B/op	      12 allocs/op
+BenchmarkQueryBaseline/end_to_end-56           	 1226858	      3896 ns/op	     992 B/op	      15 allocs/op
+BenchmarkQueryEncrypted/server/cjjjkrs_match-56         	 1758337	      2736 ns/op	    1296 B/op	      12 allocs/op
+BenchmarkQueryEncrypted/server/retrieve_sum-56          	 1422447	      3368 ns/op	     944 B/op	      12 allocs/op
+BenchmarkQueryEncrypted/client/gen_token-56             	 1000000	      4145 ns/op	    1728 B/op	      15 allocs/op
+BenchmarkQueryEncrypted/client/resolve_refs-56          	 2111865	      2262 ns/op	    1432 B/op	       8 allocs/op
+BenchmarkQueryEncrypted/client/timecrypt_decrypt-56     	  139599	     34027 ns/op	   23008 B/op	     128 allocs/op
+BenchmarkQueryEncrypted/end_to_end-56                   	   91321	     51956 ns/op	   28488 B/op	     176 allocs/op
+PASS
+ok  	github.com/prometheus/prometheus/tsdb	61.817s
