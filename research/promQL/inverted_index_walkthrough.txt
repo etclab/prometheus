@@ -1,0 +1,56 @@
+apoudel01@shs2:~/downloads/project-prometheus/prometheus$ go test ./tsdb -run '^TestInvertedIndexWalkthrough$' -v -count=1
+=== RUN   TestInvertedIndexWalkthrough
+    inverted_index_walkthrough_test.go:99: === Act 1: four time series (a series == its label set + its samples) ===
+    inverted_index_walkthrough_test.go:104: series #0  {__name__="up", env="prod", instance="10.0.0.1", job="api"}
+    inverted_index_walkthrough_test.go:106:             sample t=1781310916351 v=1
+    inverted_index_walkthrough_test.go:106:             sample t=1781310931351 v=1
+    inverted_index_walkthrough_test.go:106:             sample t=1781310946351 v=0
+    inverted_index_walkthrough_test.go:104: series #1  {__name__="up", env="prod", instance="10.0.0.2", job="api"}
+    inverted_index_walkthrough_test.go:106:             sample t=1781310916351 v=1
+    inverted_index_walkthrough_test.go:106:             sample t=1781310931351 v=1
+    inverted_index_walkthrough_test.go:106:             sample t=1781310946351 v=1
+    inverted_index_walkthrough_test.go:104: series #2  {__name__="up", env="prod", instance="10.0.0.3", job="db"}
+    inverted_index_walkthrough_test.go:106:             sample t=1781310916351 v=1
+    inverted_index_walkthrough_test.go:106:             sample t=1781310931351 v=0
+    inverted_index_walkthrough_test.go:106:             sample t=1781310946351 v=0
+    inverted_index_walkthrough_test.go:104: series #3  {__name__="up", env="staging", instance="10.0.0.4", job="db"}
+    inverted_index_walkthrough_test.go:106:             sample t=1781310916351 v=1
+    inverted_index_walkthrough_test.go:106:             sample t=1781310931351 v=1
+    inverted_index_walkthrough_test.go:106:             sample t=1781310946351 v=1
+    inverted_index_walkthrough_test.go:147: 
+    inverted_index_walkthrough_test.go:148: === Act 2: stored in the clear; the Head assigned each label set a numeric series ref ===
+    inverted_index_walkthrough_test.go:150: series ref 1  ->  {__name__="up", env="prod", instance="10.0.0.1", job="api"}
+    inverted_index_walkthrough_test.go:150: series ref 2  ->  {__name__="up", env="prod", instance="10.0.0.2", job="api"}
+    inverted_index_walkthrough_test.go:150: series ref 3  ->  {__name__="up", env="prod", instance="10.0.0.3", job="db"}
+    inverted_index_walkthrough_test.go:150: series ref 4  ->  {__name__="up", env="staging", instance="10.0.0.4", job="db"}
+    inverted_index_walkthrough_test.go:152: The label set is interned ONCE per ref; every sample is stored under that integer ref,
+    inverted_index_walkthrough_test.go:153: so labels are not repeated per sample. Nothing here is encrypted.
+    inverted_index_walkthrough_test.go:167: 
+    inverted_index_walkthrough_test.go:168: === Act 3: the inverted index — each label=value pair -> sorted list of series refs ===
+    inverted_index_walkthrough_test.go:177:   ALL-POSTINGS key ""="" -> [1 2 3 4]   (indexes every series)
+    inverted_index_walkthrough_test.go:180:   __name__="up" -> [1 2 3 4]
+    inverted_index_walkthrough_test.go:180:   env="prod" -> [1 2 3]
+    inverted_index_walkthrough_test.go:180:   env="staging" -> [4]
+    inverted_index_walkthrough_test.go:180:   instance="10.0.0.1" -> [1]
+    inverted_index_walkthrough_test.go:180:   instance="10.0.0.2" -> [2]
+    inverted_index_walkthrough_test.go:180:   instance="10.0.0.3" -> [3]
+    inverted_index_walkthrough_test.go:180:   instance="10.0.0.4" -> [4]
+    inverted_index_walkthrough_test.go:180:   job="api" -> [1 2]
+    inverted_index_walkthrough_test.go:180:   job="db" -> [3 4]
+    inverted_index_walkthrough_test.go:182: A single label=value pair pointing at its sorted refs IS a posting list.
+    inverted_index_walkthrough_test.go:201: 
+    inverted_index_walkthrough_test.go:202: === Act 4: selecting series by combining posting lists ===
+    inverted_index_walkthrough_test.go:206:   job="api"                      -> [1 2]   (one posting list)
+    inverted_index_walkthrough_test.go:214:   job="db" AND env="prod"        -> [3]   (Intersect of two lists)
+    inverted_index_walkthrough_test.go:223:   job="api" OR  job="db"         -> [1 2 3 4]   (Merge / union of lists)
+    inverted_index_walkthrough_test.go:228:   {} (all-postings key)          -> [1 2 3 4]   (every series)
+    inverted_index_walkthrough_test.go:241: 
+    inverted_index_walkthrough_test.go:242: === Act 5: resolving refs back to series and merging — querier.Select(env="prod") ===
+    inverted_index_walkthrough_test.go:272:   {__name__="up", env="prod", instance="10.0.0.1", job="api"}  samples=[(1781310916351,1), (1781310931351,1), (1781310946351,0)]
+    inverted_index_walkthrough_test.go:272:   {__name__="up", env="prod", instance="10.0.0.2", job="api"}  samples=[(1781310916351,1), (1781310931351,1), (1781310946351,1)]
+    inverted_index_walkthrough_test.go:272:   {__name__="up", env="prod", instance="10.0.0.3", job="db"}  samples=[(1781310916351,1), (1781310931351,0), (1781310946351,0)]
+    inverted_index_walkthrough_test.go:274: Three different series (two api + one db, all in prod) came back merged into one
+    inverted_index_walkthrough_test.go:275: sorted result set — that is the whole point of the inverted index.
+--- PASS: TestInvertedIndexWalkthrough (0.02s)
+PASS
+ok      github.com/prometheus/prometheus/tsdb   0.033s

@@ -1,0 +1,48 @@
+apoudel01@shs2:~/downloads/project-prometheus/prometheus$ go test ./tsdb -run '^TestEncryptedIndexWalkthrough$' -v -count=1
+=== RUN   TestEncryptedIndexWalkthrough
+    encrypted_index_walkthrough_test.go:77: === Act 0: [CLIENT] generate keys — these never cross the trust boundary ===
+    encrypted_index_walkthrough_test.go:82: [CLIENT] SSE master key derived (256-bit) for the encrypted inverted index
+    encrypted_index_walkthrough_test.go:94: [CLIENT] one TimeCrypt HEAC stream seeded per series for the sample values
+    encrypted_index_walkthrough_test.go:129: 
+    encrypted_index_walkthrough_test.go:130: === Act 1: [CLIENT] the four plaintext series (only the client ever sees these) ===
+    encrypted_index_walkthrough_test.go:136: [CLIENT] series #0  {__name__="up", env="prod", instance="10.0.0.1", job="api"}  values=[1 1 0]
+    encrypted_index_walkthrough_test.go:136: [CLIENT] series #1  {__name__="up", env="prod", instance="10.0.0.2", job="api"}  values=[1 1 1]
+    encrypted_index_walkthrough_test.go:136: [CLIENT] series #2  {__name__="up", env="prod", instance="10.0.0.3", job="db"}  values=[1 0 0]
+    encrypted_index_walkthrough_test.go:136: [CLIENT] series #3  {__name__="up", env="staging", instance="10.0.0.4", job="db"}  values=[1 1 1]
+    encrypted_index_walkthrough_test.go:158: 
+    encrypted_index_walkthrough_test.go:159: === Act 2: [CLIENT] encrypt, [SERVER] store opaque ciphertexts ===
+    encrypted_index_walkthrough_test.go:180: [SERVER] sample values as stored (HEAC ciphertext bits reinterpreted as float64):
+    encrypted_index_walkthrough_test.go:188: [SERVER]   stored=5.621297563671189e+110  (bits=0x56edeb4870967056)  <- server cannot tell this was a 1 or a 0
+    encrypted_index_walkthrough_test.go:188: [SERVER]   stored=-1.38402529669134e-25  (bits=0xbac56ab06601d52a)  <- server cannot tell this was a 1 or a 0
+    encrypted_index_walkthrough_test.go:188: [SERVER]   stored=1.5545808551087179e+90  (bits=0x52a86bcae555337c)  <- server cannot tell this was a 1 or a 0
+    encrypted_index_walkthrough_test.go:204: [CLIENT] built the encrypted inverted index (each label pair -> series ref, encrypted)
+    encrypted_index_walkthrough_test.go:215: 
+    encrypted_index_walkthrough_test.go:216: === Act 3: [SERVER] the encrypted index — CMAC label -> identifier ciphertext ===
+    encrypted_index_walkthrough_test.go:217: [SERVER] dictionary holds 20 entries (4 series x (4 label pairs + all-postings key)); a few:
+    encrypted_index_walkthrough_test.go:220: [SERVER]   c09d41bd5b12369a18c031ff... -> 0b03e6856b59874adefc06085f91e58a...
+    encrypted_index_walkthrough_test.go:220: [SERVER]   71282f8fd52e9ed1f9023281... -> 82cccb03404cb0d0bde94390a0eff1d8...
+    encrypted_index_walkthrough_test.go:220: [SERVER]   deac1b1fbe85c8401197513a... -> 7887cd7b28280c9b788eb665f06fdc7d...
+    encrypted_index_walkthrough_test.go:225: [SERVER] no label names, no values, no refs in the clear, and no way to list them.
+    encrypted_index_walkthrough_test.go:244: 
+    encrypted_index_walkthrough_test.go:245: === Act 4: select by label; the round trip never reveals the pair to the server ===
+    encrypted_index_walkthrough_test.go:249: [CLIENT] GenToken("job","api") -> search token (CMAC tags + counter)
+    encrypted_index_walkthrough_test.go:252: [SERVER] QueryCiphertexts(token) -> 2 encrypted hit(s); server sees only ciphertext
+    encrypted_index_walkthrough_test.go:255: [CLIENT] ResolveRefs(...) -> job="api" = [1 2]
+    encrypted_index_walkthrough_test.go:262: [CLIENT] job="db" AND env="prod" -> [3]   (Intersect of two encrypted lists)
+    encrypted_index_walkthrough_test.go:268: [CLIENT] job="api" OR  job="db"  -> [1 2 3 4]   (Merge / union)
+    encrypted_index_walkthrough_test.go:273: [CLIENT] env="qa" (never indexed) -> []   (empty, as expected)
+    encrypted_index_walkthrough_test.go:289: 
+    encrypted_index_walkthrough_test.go:290: === Act 5: avg_over_time(up{job="api"}) — [SERVER] sums ciphertext, [CLIENT] decrypts ===
+    encrypted_index_walkthrough_test.go:319: [SERVER] series ref 1: homomorphic ciphertext sum=0x645bc1c3bbed78fc over n=3 samples (no keys used)
+    encrypted_index_walkthrough_test.go:328: [CLIENT] series ref 1: decrypted sum_over_time=2 -> avg_over_time(up)=0.667 (availability)
+    encrypted_index_walkthrough_test.go:319: [SERVER] series ref 2: homomorphic ciphertext sum=0x4e499283faa6279 over n=3 samples (no keys used)
+    encrypted_index_walkthrough_test.go:328: [CLIENT] series ref 2: decrypted sum_over_time=3 -> avg_over_time(up)=1.000 (availability)
+    encrypted_index_walkthrough_test.go:337: 
+    encrypted_index_walkthrough_test.go:338: === Trust boundary recap ===
+    encrypted_index_walkthrough_test.go:339: [CLIENT] encrypts: label pairs -> SSE tokens; sample values -> HEAC ciphertexts. Holds all keys.
+    encrypted_index_walkthrough_test.go:340: [CLIENT] decrypts: search results (refs) and homomorphic aggregates. The only party that can.
+    encrypted_index_walkthrough_test.go:341: [SERVER] stores:   opaque float bits + a CMAC->ciphertext dictionary. Computes: token match + ciphertext SUM.
+    encrypted_index_walkthrough_test.go:342: [SERVER] never sees: label pairs, sample values, query plaintext, results, or even the label vocabulary.
+--- PASS: TestEncryptedIndexWalkthrough (0.08s)
+PASS
+ok      github.com/prometheus/prometheus/tsdb   0.096s
