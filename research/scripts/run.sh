@@ -16,5 +16,18 @@ else
   go build -o prometheus ./cmd/prometheus
 fi
 
+# Build and start the demo Go app "myapp", which exposes metrics on :2112.
+# It is its own Go module, so build it from within its directory with the repo's
+# go.work workspace disabled (GOWORK=off) so it resolves against its own go.mod.
+(cd "${REPO_ROOT}/research/myapp" && GOWORK=off go build -o "${REPO_ROOT}/myapp-bin" .)
+"${REPO_ROOT}/myapp-bin" &
+MYAPP_PID=$!
+
+# Stop myapp when this script exits (Ctrl-C, error, or Prometheus shutdown).
+cleanup() {
+  kill "${MYAPP_PID}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
 # Run Prometheus with the example config.
-./prometheus --config.file=documentation/examples/prometheus.yml
+./prometheus --config.file=research/configs/prometheus.yml
