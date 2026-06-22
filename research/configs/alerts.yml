@@ -1,0 +1,15 @@
+groups:
+  - name: myapp-alerts
+    rules:
+      # Fire when myapp's processed-ops gauge has gone DOWN over the last minute.
+      #
+      # delta() returns the net change of a gauge across the range window, so a
+      # negative delta means the value decreased. This keeps the query simple
+      # (one function over a time window) instead of comparing offsets by hand.
+      - alert: MyappOpsDecreasing
+        expr: delta(myapp_processed_ops[1m]) < 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "myapp processed ops are decreasing"
+          description: "myapp_processed_ops fell by {{ $value }} over the last minute."

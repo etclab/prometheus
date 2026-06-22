@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math/rand"
 	"net/http"
 	"time"
 
@@ -10,14 +11,16 @@ import (
 )
 
 type metrics struct {
-	opsProcessed prometheus.Counter
+	opsProcessed prometheus.Gauge
 }
 
 func newMetrics(reg prometheus.Registerer) *metrics {
 	m := &metrics{
-		opsProcessed: promauto.With(reg).NewCounter(prometheus.CounterOpts{
-			Name: "myapp_processed_ops_total",
-			Help: "The total number of processed events",
+		// A gauge (not a counter): the value can go both up and down, so we drop
+		// the counter-only "_total" suffix from the metric name.
+		opsProcessed: promauto.With(reg).NewGauge(prometheus.GaugeOpts{
+			Name: "myapp_processed_ops",
+			Help: "The current number of processed events; randomly walks up and down",
 		}),
 	}
 	return m
@@ -26,8 +29,14 @@ func newMetrics(reg prometheus.Registerer) *metrics {
 func recordMetrics(m *metrics) {
 	go func() {
 		for {
-			m.opsProcessed.Inc()
-			time.Sleep(2 * time.Second)
+			// Randomly walk the gauge, biased downward so decreases are common
+			// and easy to alert on (90% chance to decrease, 10% to increase).
+			if rand.Intn(10) < 9 {
+				m.opsProcessed.Dec()
+			} else {
+				m.opsProcessed.Inc()
+			}
+			time.Sleep(1 * time.Second)
 		}
 	}()
 }
