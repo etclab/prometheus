@@ -2,6 +2,8 @@ module myapp
 
 go 1.25.0
 
+require github.com/aashutoshpaudyal/timecrypt-go v0.0.0
+
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -14,3 +16,5 @@ require (
 	golang.org/x/sys v0.35.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )
+
+replace github.com/aashutoshpaudyal/timecrypt-go => ../../timecrypt-go

@@ -70,6 +70,7 @@ import (
 	_ "github.com/prometheus/prometheus/plugins" // Register plugins.
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/promql/parser"
+	"github.com/prometheus/prometheus/research/timecrypteval"
 	"github.com/prometheus/prometheus/rules"
 	"github.com/prometheus/prometheus/scrape"
 	"github.com/prometheus/prometheus/storage"
@@ -218,6 +219,10 @@ type flagConfig struct {
 
 	prometheusURL   string
 	corsRegexString string
+
+	// timecryptKeysDir, when non-empty, enables the research encrypted-rule
+	// evaluator using TimeCrypt key material from this directory.
+	timecryptKeysDir string
 
 	promqlEnableDelayedNameRemoval bool
 
@@ -634,6 +639,9 @@ func main() {
 	a.Flag("enable-feature", "Comma separated feature names to enable. Valid options: concurrent-rule-eval, created-timestamp-zero-ingestion, delayed-compaction, exemplar-storage, extra-scrape-metrics, memory-snapshot-on-shutdown, metadata-wal-records, old-ui, otlp-deltatocumulative, otlp-native-delta-ingestion, promql-binop-fill-modifiers, promql-delayed-name-removal, promql-duration-expr, promql-experimental-functions, promql-extended-range-selectors, promql-per-step-stats, search-api, st-storage, st-synthesis, type-and-unit-labels, use-start-timestamps, use-uncached-io, xor2-encoding. See https://prometheus.io/docs/prometheus/latest/feature_flags/ for more details.").
 		StringsVar(&cfg.featureList)
 
+	a.Flag("timecrypt.keys-dir", "Research/experimental: directory of TimeCrypt key material (manifest.json + master seeds). When set, alerting/recording rules over encrypted metrics are evaluated by decrypting the per-series aggregate at the rule evaluator before the threshold comparison.").
+		Default("").StringVar(&cfg.timecryptKeysDir)
+
 	a.Flag("agent", "Run Prometheus in 'Agent mode'.").BoolVar(&agentMode)
 
 	promslogflag.AddFlags(a, &cfg.promslogConfig)
@@ -996,11 +1004,28 @@ func main() {
 
 		queryEngine = promql.NewEngine(opts)
 
+		// ruleQueryFunc is the function the rule manager uses to evaluate rule
+		// expressions. By default it is the plaintext PromQL engine. When
+		// --timecrypt.keys-dir is set (research/encrypted-Prometheus demo), it
+		// is wrapped so rules over TimeCrypt-encrypted metrics are evaluated by
+		// decrypting the per-series aggregate at this key holder before the
+		// threshold comparison; all other queries pass through unchanged.
+		ruleQueryFunc := rules.EngineQueryFunc(queryEngine, fanoutStorage)
+		if cfg.timecryptKeysDir != "" {
+			tcQueryFunc, err := timecrypteval.New(ruleQueryFunc, localStorage, cfg.timecryptKeysDir)
+			if err != nil {
+				logger.Error("Error initializing TimeCrypt rule evaluator", "err", err)
+				os.Exit(1)
+			}
+			ruleQueryFunc = tcQueryFunc
+			logger.Info("TimeCrypt encrypted rule evaluation enabled", "keys_dir", cfg.timecryptKeysDir)
+		}
+
 		ruleManager = rules.NewManager(&rules.ManagerOptions{
 			NameValidationScheme:   cfgFile.GlobalConfig.MetricNameValidationScheme,
 			Appendable:             fanoutStorage,
 			Queryable:              localStorage,
-			QueryFunc:              rules.EngineQueryFunc(queryEngine, fanoutStorage),
+			QueryFunc:              ruleQueryFunc,
 			NotifyFunc:             rules.SendAlerts(notifierManager, cfg.web.ExternalURL.String()),
 			Context:                ctxRule,
 			ExternalURL:            cfg.web.ExternalURL,
