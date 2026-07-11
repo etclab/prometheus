@@ -22,15 +22,13 @@ import (
 // struct is read by myapp (to encrypt) and by the Prometheus evaluator (to
 // decrypt), so the JSON tags are the shared contract.
 type Stream struct {
-	Metric  string `json:"metric"`   // the encrypted gauge's metric name.
-	KeyFile string `json:"key_file"` // master-seed file, relative to the manifest dir.
-	// TODO: here
+	Metric       string `json:"metric"`        // the encrypted gauge's metric name.
+	KeyFile      string `json:"key_file"`      // master-seed file, relative to the manifest dir.
 	TimeIDMetric string `json:"timeid_metric"` // companion gauge carrying each sample's timeID.
-	// TODO: start: think about out the bits,chunks,scale
-	Scale   float64 `json:"scale"`    // fixed-point scale (float -> int64).
-	ModBits int     `json:"mod_bits"` // HEAC modulus bit width (<= 52 for float64-exact transport).
-	// TODO: end
-	TreeDepth int `json:"tree_depth"` // key-regression tree depth (2^depth time steps).
+	// TODO: think about out the bits,chunks,scale
+	Scale     float64 `json:"scale"`      // fixed-point scale (float -> int64).
+	ModBits   int     `json:"mod_bits"`   // HEAC modulus bit width (<= 52 for float64-exact transport).
+	TreeDepth int     `json:"tree_depth"` // key-regression tree depth (2^depth time steps).
 }
 
 // Manifest is the set of encrypted streams, written to manifest.json.

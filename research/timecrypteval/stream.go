@@ -56,6 +56,8 @@ func loadStreams(keysDir string) (map[string]*encStream, error) {
 		if err != nil {
 			return nil, fmt.Errorf("timecrypteval: reading key %q: %w", s.KeyFile, err)
 		}
+		// TODO: a reader should only have keys (restricted) to the time range/resolution they're querying
+		// TODO: not the entire stream's master key
 		skm, err := timecrypt.NewStreamKeyManager(master, s.TreeDepth)
 		if err != nil {
 			return nil, fmt.Errorf("timecrypteval: stream key manager for %q: %w", s.Metric, err)
@@ -77,6 +79,7 @@ func (s *encStream) decryptPoint(residue *big.Int, timeID int64) (float64, error
 	if err != nil {
 		return 0, err
 	}
+	// TODO: revisit the float to int to encrypted value conversion and back
 	return timecrypt.FixedToFloat(timecrypt.SignedFromResidue(p, s.modBits), s.scale), nil
 }
 
