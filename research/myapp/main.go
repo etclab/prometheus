@@ -11,7 +11,6 @@
 //     exact-integer float64 (the modulus is <= 2^52 so it survives the text
 //     exposition format and XOR chunk storage without loss).
 //
-// TODO: why are there to series?
 //   - myapp_processed_ops_timeid the HEAC time index of that sample, so the
 //     key-holding rule evaluator knows which keys decrypt each sample.
 //
@@ -40,8 +39,9 @@ import (
 
 // stream mirrors the manifest entry written by research/keytool.
 type stream struct {
-	Metric       string  `json:"metric"`
-	KeyFile      string  `json:"key_file"`
+	Metric  string `json:"metric"`
+	KeyFile string `json:"key_file"`
+	// companion HEAC time id metric name?
 	TimeIDMetric string  `json:"timeid_metric"`
 	Scale        float64 `json:"scale"`
 	ModBits      int     `json:"mod_bits"`
@@ -54,6 +54,7 @@ type manifest struct {
 
 // loadStream reads the manifest + master seed for one metric and builds the
 // HEAC encryption scheme for it.
+// TODO: HOMAC isn't added yet?
 func loadStream(keysDir, metric string) (stream, *timecrypt.TimeCryptEncryptionBI) {
 	blob, err := os.ReadFile(filepath.Join(keysDir, "manifest.json"))
 	if err != nil {
@@ -83,11 +84,17 @@ func loadStream(keysDir, metric string) (stream, *timecrypt.TimeCryptEncryptionB
 }
 
 // encCollector owns the plaintext value and emits its encryption on scrape.
+//
+// When plaintext is set it becomes the no-TimeCrypt demo source: it exposes the
+// raw gauge directly (no encryption, no timeID companion) so the standalone
+// plaintext rule evaluator (research/plaintexteval) can aggregate and threshold
+// it over the normal Prometheus HTTP API.
 type encCollector struct {
 	mu         sync.Mutex
 	value      float64
 	nextTimeID int64
 
+	plaintext  bool
 	enc        *timecrypt.TimeCryptEncryptionBI
 	scale      float64
 	valueDesc  *prometheus.Desc
@@ -100,6 +107,17 @@ func newEncCollector(s stream, enc *timecrypt.TimeCryptEncryptionBI) *encCollect
 		scale:      s.Scale,
 		valueDesc:  prometheus.NewDesc(s.Metric, "TimeCrypt (HEAC) ciphertext of the processed-ops gauge; decrypts client-side.", nil, nil),
 		timeIDDesc: prometheus.NewDesc(s.TimeIDMetric, "HEAC time index (key id) of the current myapp_processed_ops ciphertext.", nil, nil),
+	}
+}
+
+// newPlainCollector builds the no-TimeCrypt variant: the same downward
+// random-walk exposed as a plain gauge under the usual metric name, so
+// research/configs/alerts.yml (delta(myapp_processed_ops[1m]) < 0) fires
+// unchanged against real plaintext values.
+func newPlainCollector() *encCollector {
+	return &encCollector{
+		plaintext: true,
+		valueDesc: prometheus.NewDesc("myapp_processed_ops", "Plaintext processed-ops gauge (no TimeCrypt).", nil, nil),
 	}
 }
 
@@ -121,12 +139,23 @@ func (c *encCollector) walk() {
 
 func (c *encCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.valueDesc
-	ch <- c.timeIDDesc
+	if !c.plaintext {
+		ch <- c.timeIDDesc
+	}
 }
 
 // Collect encrypts the current value at the next contiguous timeID and emits
-// the ciphertext + timeID as one consistent pair.
+// the ciphertext + timeID as one consistent pair. In plaintext mode it emits
+// the raw gauge value instead.
 func (c *encCollector) Collect(ch chan<- prometheus.Metric) {
+	if c.plaintext {
+		c.mu.Lock()
+		v := c.value
+		c.mu.Unlock()
+		ch <- prometheus.MustNewConstMetric(c.valueDesc, prometheus.GaugeValue, v)
+		return
+	}
+
 	c.mu.Lock()
 	timeID := c.nextTimeID
 	c.nextTimeID++
@@ -145,16 +174,25 @@ func (c *encCollector) Collect(ch chan<- prometheus.Metric) {
 func main() {
 	keysDir := flag.String("keys-dir", "research/keys", "directory holding the TimeCrypt manifest and master seeds")
 	addr := flag.String("addr", ":2112", "address to serve /metrics on")
+	plaintext := flag.Bool("plaintext", false, "expose myapp_processed_ops as a plain gauge (no TimeCrypt); used with the plaintext rule evaluator")
 	flag.Parse()
 
-	s, enc := loadStream(*keysDir, "myapp_processed_ops")
-
 	reg := prometheus.NewRegistry()
-	c := newEncCollector(s, enc)
+	var c *encCollector
+	if *plaintext {
+		c = newPlainCollector()
+	} else {
+		s, enc := loadStream(*keysDir, "myapp_processed_ops")
+		c = newEncCollector(s, enc)
+	}
 	reg.MustRegister(c)
 	go c.walk()
 
 	http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-	log.Printf("myapp: serving encrypted metrics on %s (keys from %s)", *addr, *keysDir)
+	if *plaintext {
+		log.Printf("myapp: serving plaintext metrics on %s", *addr)
+	} else {
+		log.Printf("myapp: serving encrypted metrics on %s (keys from %s)", *addr, *keysDir)
+	}
 	log.Fatal(http.ListenAndServe(*addr, nil))
 }

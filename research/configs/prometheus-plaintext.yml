@@ -1,0 +1,26 @@
+# Plaintext (no-TimeCrypt) demo config.
+#
+# Prometheus's own rule evaluation and alerting are intentionally OFF here: there
+# is no `rule_files:` and no `alerting: alertmanagers:`. Alerting is delegated to
+# the standalone research/plaintexteval evaluator, which queries this server,
+# applies the threshold itself, and posts to Alertmanager. See
+# research/docs/architecture-assumptions-and-decisions.md (decision #7).
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# A scrape configuration containing exactly one endpoint to scrape:
+# Here it's Prometheus itself.
+scrape_configs:
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels:
+          app: "prometheus"
+
+  # demo Go app: "myapp" running in --plaintext mode (raw gauge, no ciphertext).
+  - job_name: myapp
+    scrape_interval: 10s
+    static_configs:
+      - targets:
+          - localhost:2112
