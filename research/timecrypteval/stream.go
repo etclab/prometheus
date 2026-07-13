@@ -1,7 +1,6 @@
-package timecrypteval
+package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -12,8 +11,6 @@ import (
 	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/prometheus/model/labels"
-	"github.com/prometheus/prometheus/storage"
-	"github.com/prometheus/prometheus/tsdb/chunkenc"
 )
 
 // streamConfig mirrors one manifest entry written by research/keytool.
@@ -83,27 +80,33 @@ func (s *encStream) decryptPoint(residue *big.Int, timeID int64) (float64, error
 	return timecrypt.FixedToFloat(timecrypt.SignedFromResidue(p, s.modBits), s.scale), nil
 }
 
-// decryptWindowSum decrypts the homomorphic sum of the window's samples.
-//
-// When the timeIDs are contiguous it uses HEAC's telescoping property: the
-// server-side sum of the ciphertext residues decrypts with only the two
-// boundary keys, so no per-sample key is ever materialised. When they are not
-// contiguous (e.g. a scrape gap) it falls back to summing per-point
-// decryptions, which is always correct but reveals each plaintext to the key
-// holder.
+// decryptRangeSum decrypts a homomorphic range sum: the caller has already added
+// the ciphertext residues over a contiguous window [from,to]; HEAC's telescoping
+// property means the sum decrypts with only the two boundary keys, so no
+// per-sample key is ever materialised. sumResidue is the (possibly un-reduced)
+// integer sum of the residues; DecryptMetadata reduces it mod 2^modBits
+// internally.
+func (s *encStream) decryptRangeSum(sumResidue *big.Int, from, to int64) (float64, error) {
+	p, err := s.enc.DecryptMetadata(sumResidue, from, to, 0)
+	if err != nil {
+		return 0, err
+	}
+	return timecrypt.FixedToFloat(timecrypt.SignedFromResidue(p, s.modBits), s.scale), nil
+}
+
+// decryptWindowSum decrypts the homomorphic sum of the window's samples from the
+// raw per-sample points. It is the summable family's aggregation: when the
+// timeIDs are contiguous it adds the ciphertext residues locally and uses the
+// telescoping property (decryptRangeSum) to decrypt with only the two boundary
+// keys; otherwise (a scrape gap) it falls back to summing per-point decryptions,
+// which is always correct but reveals each plaintext to the key holder.
 func (s *encStream) decryptWindowSum(points []point) (float64, error) {
 	if contiguous(points) {
 		sum := new(big.Int)
 		for _, p := range points {
 			sum.Add(sum, p.residue) // server step: add ciphertexts, no keys.
 		}
-		from := points[0].timeID
-		to := points[len(points)-1].timeID
-		p, err := s.enc.DecryptMetadata(sum, from, to, 0)
-		if err != nil {
-			return 0, err
-		}
-		return timecrypt.FixedToFloat(timecrypt.SignedFromResidue(p, s.modBits), s.scale), nil
+		return s.decryptRangeSum(sum, points[0].timeID, points[len(points)-1].timeID)
 	}
 
 	var total float64
@@ -126,8 +129,8 @@ func contiguous(points []point) bool {
 	return true
 }
 
-// seriesSamples is the per-series float samples read from storage, keyed for
-// pairing the value series with its timeID companion.
+// seriesSamples is the per-series float samples read back from Prometheus, keyed
+// for pairing the value series with its timeID companion.
 type seriesSamples struct {
 	metric  labels.Labels // labels with __name__ stripped (the pairing key + output labels).
 	samples []fpoint
@@ -140,47 +143,54 @@ type fpoint struct {
 
 // point is a value sample aligned with its HEAC timeID for one timestamp.
 type point struct {
-	t       int64
+	t int64
+	// forgot why this is called residue?
 	residue *big.Int
 	timeID  int64
 }
 
-// collectSeries selects metric{matchers} over [mint,maxt] and returns the float
-// samples per series, keyed by the series' non-name label fingerprint so the
-// value and timeID series of the same target can be paired.
-func collectSeries(ctx context.Context, q storage.Querier, metric string, matchers []*labels.Matcher, mint, maxt int64) (map[uint64]seriesSamples, error) {
-	ms := make([]*labels.Matcher, 0, len(matchers)+1)
-	ms = append(ms, labels.MustNewMatcher(labels.MatchEqual, model.MetricNameLabel, metric))
-	ms = append(ms, matchers...)
+// atp: okay range-vector vs instant-vector
+//
+// instant-vector - a list of metric values (or samples) for all the timeseries
+// 	(matching a set of labels) at a given timestamp (timestamp and timeseries
+// 	are two different things heres). (1D)
+//
+// range-vector - a list of instant-vector for a range of timestamps (2D)
+// 	ie. (timeseries_id, timestamp)
 
-	ss := q.Select(ctx, false, &storage.SelectHints{Start: mint, End: maxt}, ms...)
-	out := map[uint64]seriesSamples{}
-	builder := labels.NewBuilder(labels.EmptyLabels())
-	for ss.Next() {
-		series := ss.At()
-		builder.Reset(series.Labels())
-		stripped := builder.Del(model.MetricNameLabel).Labels()
-		key := stripped.Hash()
-
-		var samples []fpoint
-		it := series.Iterator(nil)
-		for it.Next() == chunkenc.ValFloat {
-			ts, f := it.At()
-			if ts < mint || ts > maxt {
-				continue
-			}
-			samples = append(samples, fpoint{t: ts, f: f})
+// matrixToSeries turns a range-vector HTTP result into per-series float samples,
+// keyed by the series' non-name label fingerprint so the value and timeID series
+// of the same target can be paired.
+func matrixToSeries(m model.Matrix) map[uint64]seriesSamples {
+	out := make(map[uint64]seriesSamples, len(m))
+	for _, ss := range m {
+		lbls := stripName(ss.Metric)
+		key := lbls.Hash()
+		samples := make([]fpoint, 0, len(ss.Values))
+		for _, v := range ss.Values {
+			samples = append(samples, fpoint{t: int64(v.Timestamp), f: float64(v.Value)})
 		}
-		if err := it.Err(); err != nil {
-			return nil, err
-		}
-		out[key] = seriesSamples{metric: stripped, samples: samples}
+		out[key] = seriesSamples{metric: lbls, samples: samples}
 	}
-	if err := ss.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return out
 }
+
+// stripName converts an HTTP-result metric into labels.Labels with __name__
+// removed, matching the pairing/output key used throughout the evaluator.
+func stripName(m model.Metric) labels.Labels {
+	b := labels.NewBuilder(labels.EmptyLabels())
+	for name, val := range m {
+		if name == model.MetricNameLabel {
+			continue
+		}
+		b.Set(string(name), string(val))
+	}
+	return b.Labels()
+}
+
+// atp: review this later
+// on surface it's obvious to understand what timeID is doing but look
+// at an example
 
 // pair aligns value samples with timeID samples by timestamp, decoding the
 // float-carried ciphertext residue back to an exact integer.
