@@ -36,3 +36,5 @@ y.output
 myapp-bin
 keytool-bin
 plaintexteval-bin
+timecrypteval
+timecrypteval-bin
