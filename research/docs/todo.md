@@ -30,6 +30,9 @@
 
 - because of the companion timeID are we running two queries for one sample?
     - one to get the exact timeID and other for the sample values
+- for missing values or resets who does the interpolation? Prometheus?
+- Prometheus will auto add job(myapp), and instance (localhost:2112) labels when it receives samples from scrape target 
+for the first time and creates the series. These are read from `scrape_configs`, okay.
 
 - two different kinds of aggregation
     - functions like `rate, abs, ceil, etc` that are performed element-wise across time in a single series
