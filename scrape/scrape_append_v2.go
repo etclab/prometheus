@@ -29,6 +29,7 @@ import (
 	"github.com/prometheus/prometheus/model/textparse"
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/model/value"
+	"github.com/prometheus/prometheus/research/indextrace"
 	"github.com/prometheus/prometheus/storage"
 )
 
@@ -213,13 +214,32 @@ loop:
 			ref = ce.ref
 			lset = ce.lset
 			hash = ce.hash
+			if indextrace.On(lset) {
+				// The steady-state path: this exact exposition line is already in
+				// the scrape cache, so the label set is not re-parsed and the
+				// index is not touched — the cached series ref is reused.
+				indextrace.Log("scrape-v2/cache-hit", "met=%q ref=%d hash=%d (labels not re-parsed, index untouched)", met, ref, hash)
+			}
 		} else {
 			p.Labels(&lset)
 			hash = lset.Hash()
+			if indextrace.On(lset) {
+				// First sight of this exposition line. The metric name is not
+				// special here: the parser has already turned it into the
+				// __name__ label, so everything downstream treats it as one
+				// label among many.
+				indextrace.Log("scrape-v2/parsed", "met=%q -> lset=%s hash=%d", met, lset.String(), hash)
+			}
 
 			// Hash label set as it is seen local to the target. Then add target labels
 			// and relabeling and store the final label set.
 			lset = sl.sampleMutator(lset)
+			if indextrace.On(lset) {
+				// Target labels (job, instance, plus any static_configs labels)
+				// and relabeling are applied here, so this is the label set that
+				// actually reaches the appender and the inverted index.
+				indextrace.Log("scrape-v2/mutated", "met=%q -> lset=%s (job/instance + relabeling applied)", met, lset.String())
+			}
 
 			// The label set may be set to empty to indicate dropping.
 			if lset.IsEmpty() {

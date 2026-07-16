@@ -53,6 +53,7 @@ import (
 	"github.com/prometheus/prometheus/model/textparse"
 	"github.com/prometheus/prometheus/model/timestamp"
 	"github.com/prometheus/prometheus/model/value"
+	"github.com/prometheus/prometheus/research/indextrace"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/logging"
 	"github.com/prometheus/prometheus/util/namevalidationutil"
@@ -1715,13 +1716,36 @@ loop:
 			ref = ce.ref
 			lset = ce.lset
 			hash = ce.hash
+			if indextrace.On(lset) {
+				// The steady-state path: the raw exposition line is already in
+				// the scrape cache, so the label set is not re-parsed and the
+				// index is not touched at all — the cached series ref is reused.
+				//
+				// Note this is the v1 append path, used only when no
+				// storage.AppendableV2 is wired (see scrapeLoop.appender). With
+				// TSDB, and so in the research demos, scrape_append_v2.go runs
+				// instead and these lines never appear.
+				indextrace.Log("scrape-v1/cache-hit", "met=%q ref=%d hash=%d (labels not re-parsed, index untouched)", met, ref, hash)
+			}
 		} else {
 			p.Labels(&lset)
 			hash = lset.Hash()
+			if indextrace.On(lset) {
+				// First sight of this exposition line. The metric name is not
+				// special here: the parser has already turned it into the
+				// __name__ label, so what follows treats it like any other.
+				indextrace.Log("scrape-v1/parsed", "met=%q -> lset=%s hash=%d", met, lset.String(), hash)
+			}
 
 			// Hash label set as it is seen local to the target. Then add target labels
 			// and relabeling and store the final label set.
 			lset = sl.sampleMutator(lset)
+			if indextrace.On(lset) {
+				// Target labels (job, instance, and any static_configs labels)
+				// and relabeling are applied here, so this is the label set that
+				// actually reaches the appender and the index.
+				indextrace.Log("scrape-v1/mutated", "met=%q -> lset=%s (job/instance + relabeling applied)", met, lset.String())
+			}
 
 			// The label set may be set to empty to indicate dropping.
 			if lset.IsEmpty() {

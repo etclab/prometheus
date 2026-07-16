@@ -30,6 +30,7 @@ import (
 	"github.com/bboreham/go-loser"
 
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/research/indextrace"
 	"github.com/prometheus/prometheus/storage"
 )
 
@@ -403,10 +404,20 @@ func (p *MemPostings) Iter(f func(labels.Label, Postings) error) error {
 func (p *MemPostings) Add(id storage.SeriesRef, lset labels.Labels) {
 	p.mtx.Lock()
 
+	trace := indextrace.On(lset)
 	lset.Range(func(l labels.Label) {
 		p.addFor(id, l)
+		if trace {
+			// One line per (label, value) -> id entry, i.e. one line per key of
+			// the inverted index this series is filed under. __name__ appears
+			// here as an ordinary label.
+			indextrace.Log("postings/add", "m[%q][%q] += id=%d (now %d ids)", l.Name, l.Value, id, len(p.m[l.Name][l.Value]))
+		}
 	})
 	p.addFor(id, allPostingsKey)
+	if trace {
+		indextrace.Log("postings/add", "m[%q][%q] += id=%d (the all-postings list)", allPostingsKey.Name, allPostingsKey.Value, id)
+	}
 
 	p.mtx.Unlock()
 }

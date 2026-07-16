@@ -40,6 +40,7 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/metadata"
 	"github.com/prometheus/prometheus/model/value"
+	"github.com/prometheus/prometheus/research/indextrace"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
@@ -1915,6 +1916,18 @@ func (h *Head) getOrCreateWithOptionalID(id chunks.HeadSeriesRef, hash uint64, l
 	if id == 0 {
 		// Note this id is wasted in the case where a concurrent operation creates the same series first.
 		id = chunks.HeadSeriesRef(h.lastSeriesID.Inc())
+		if indextrace.On(lset) {
+			// The series ID is nothing but this counter: identity ("have I seen
+			// this label set before?") lives in h.series, keyed by label hash.
+			indextrace.Log("head/mint-id", "new series id=%d (from h.lastSeriesID counter) for lset=%s hash=%d", id, lset.String(), hash)
+		}
+	} else if indextrace.On(lset) {
+		// A caller-supplied ID means this is WAL replay at startup rebuilding a
+		// series that a previous run already minted, not a new one. The ID is
+		// read back from the WAL record, so no counter is touched — but the
+		// postings below are still rebuilt from scratch, in-memory, from the
+		// plaintext label set stored in the WAL.
+		indextrace.Log("head/replay-id", "series id=%d supplied by caller (WAL replay) for lset=%s hash=%d", id, lset.String(), hash)
 	}
 
 	shardHash := uint64(0)
