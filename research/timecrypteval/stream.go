@@ -23,8 +23,16 @@ type streamConfig struct {
 	TreeDepth    int     `json:"tree_depth"`
 }
 
+// hermesConfig mirrors the manifest's hermes block written by research/keytool.
+type hermesConfig struct {
+	SeedFile   string         `json:"seed_file"`
+	NumWriters int            `json:"num_writers"`
+	Writers    map[string]int `json:"writers"`
+}
+
 type manifestFile struct {
 	Streams []streamConfig `json:"streams"`
+	Hermes  hermesConfig   `json:"hermes"`
 }
 
 // encStream holds the per-metric decryption scheme and encoding parameters.
@@ -38,26 +46,26 @@ type encStream struct {
 
 // loadStreams reads the manifest and per-stream master seeds from keysDir and
 // builds a decryption scheme per encrypted metric.
-func loadStreams(keysDir string) (map[string]*encStream, error) {
+func loadStreams(keysDir string) (map[string]*encStream, hermesConfig, error) {
 	blob, err := os.ReadFile(filepath.Join(keysDir, "manifest.json"))
 	if err != nil {
-		return nil, fmt.Errorf("timecrypteval: reading manifest: %w", err)
+		return nil, hermesConfig{}, fmt.Errorf("timecrypteval: reading manifest: %w", err)
 	}
 	var mf manifestFile
 	if err := json.Unmarshal(blob, &mf); err != nil {
-		return nil, fmt.Errorf("timecrypteval: parsing manifest: %w", err)
+		return nil, hermesConfig{}, fmt.Errorf("timecrypteval: parsing manifest: %w", err)
 	}
 	streams := make(map[string]*encStream, len(mf.Streams))
 	for _, s := range mf.Streams {
 		master, err := os.ReadFile(filepath.Join(keysDir, s.KeyFile))
 		if err != nil {
-			return nil, fmt.Errorf("timecrypteval: reading key %q: %w", s.KeyFile, err)
+			return nil, hermesConfig{}, fmt.Errorf("timecrypteval: reading key %q: %w", s.KeyFile, err)
 		}
 		// TODO: a reader should only have keys (restricted) to the time range/resolution they're querying
 		// TODO: not the entire stream's master key
 		skm, err := timecrypt.NewStreamKeyManager(master, s.TreeDepth)
 		if err != nil {
-			return nil, fmt.Errorf("timecrypteval: stream key manager for %q: %w", s.Metric, err)
+			return nil, hermesConfig{}, fmt.Errorf("timecrypteval: stream key manager for %q: %w", s.Metric, err)
 		}
 		streams[s.Metric] = &encStream{
 			metric:       s.Metric,
@@ -67,7 +75,7 @@ func loadStreams(keysDir string) (map[string]*encStream, error) {
 			enc:          timecrypt.NewTimeCryptEncryptionBI(skm.TreeKeyRegression(), s.ModBits),
 		}
 	}
-	return streams, nil
+	return streams, mf.Hermes, nil
 }
 
 // decryptPoint decrypts one sample (timeID range [id,id]) to a plaintext float.

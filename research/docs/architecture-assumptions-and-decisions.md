@@ -24,6 +24,14 @@ the exporter/publisher-agent split.
    compiles queries, receives encrypted aggregate results from Prometheus,
    decrypts them, applies thresholds, and drives alerting. Keys are never
    exposed to Prometheus.
+6. **The adversary is an honest-but-curious Prometheus.** It follows the
+   protocol but tries to learn from everything it observes, including its own
+   in-memory scrape state. For now we accept that Prometheus knows each target's
+   scrape URL (`instance`) and `job` — they are in its config and in the scrape
+   connection — and defer hiding them behind a **proxy** that fronts all targets
+   at one indistinguishable address (see the "What still leaks" note in decision
+   #8). Broader adversaries (on-disk block readers, remote-read/federation
+   consumers) are out of scope in the base design.
 
 ## Decisions
 
@@ -192,10 +200,76 @@ whole-expression model fights the aggregate-server / threshold-client split.)
   (vendor + attestation + side-channel assumptions) to the TCB and requires
   remote attestation before keys are released to the enclave.
 
+### 8. The metadata plane: Hermes as the encrypted inverted index
+
+The value plane (TimeCrypt) and the metadata plane are separate problems.
+Decision #4 covers values; this covers `(label, value) -> series`.
+
+**Hermes** (IEEE S&P 2025, [eprint 2025/701](https://eprint.iacr.org/2025/701),
+ported to Go at `../Hermes/hermes-go`) runs **inside** Prometheus as the
+encrypted inverted index, consistent with decision #2: Prometheus is the
+untrusted server, so the encrypted index belongs to it, not to a new component.
+The mapping is:
+
+| Hermes | Prometheus |
+| --- | --- |
+| writer class | a scrape target, holding its own writer key |
+| keyword | a canonical `(label name, value)` pair |
+| document id | an opaque, writer-assigned series id (`sid`) |
+| engine | `tsdb/hermes`, inside the untrusted server |
+| reader | the trusted rule evaluator of decision #7 |
+
+**Why the document id is writer-assigned.** Prometheus mints a `SeriesRef`
+internally, *after* the target has already encrypted its pairs, so a writer can
+never know it. Instead the target derives `sid = PRF(writerKey, labelset)` and
+exposes the series as `enc_series{sid="..."}`. Prometheus's ordinary postings
+index then supplies `sid -> SeriesRef` for free, and the encrypted index needs
+no id mapping of its own. This is what keeps the change small: the only TSDB
+change is one branch in `PostingsForMatchers`.
+
+**How a query carries a search.** Aggregate keys are multi-kilobyte, so they do
+not fit in a selector. The evaluator POSTs them as `hermes_<id>` parameters
+alongside the PromQL text and refers to them from a reserved matcher:
+`enc_series{__hermes__="q0,q1"}[1m]`. The ids are intersected, so an encrypted
+lookup composes with ordinary label matching instead of bypassing it.
+
+**Why Hermes rather than the single-writer SSE sketch.** The earlier
+`tsdb/index/postings_encrypted.go` (Clusion DynRH2Lev) holds one client key in
+one process. Prometheus is inherently multi-writer: several targets index the
+same pairs (`job="myapp"`) under keys none of them share. Hermes is built for
+exactly that — per-writer keys, one reader aggregate key over a writer subset —
+and two writers indexing the same pair leave *unlinkable* state on the server.
+
+**What still leaks, stated plainly:**
+- **Target identity.** Prometheus attaches `job` and `instance` itself at scrape
+  time, so they stay plaintext no matter what the target encrypts. Relabeling
+  them out of storage does *not* close this against the honest-but-curious
+  Prometheus of assumption #6: the scrape loop already ties each `sid` to its
+  target (the `Target` object) from the connection itself, independent of what
+  is stored. That link is what actually hurts — it lets Prometheus re-attach
+  plaintext labels to a `sid` and thereby back out which pair an encrypted search
+  matched, defeating the query-matcher privacy Hermes is meant to provide.
+  Hiding target identity therefore needs a **proxy** (or push/remote-write path)
+  that collapses all targets behind one address; the storage relabel is coupled
+  to it and must ship *together* with it, otherwise storage re-leaks exactly what
+  the proxy just hid. Both are deferred for now (assumption #6).
+- **Search access pattern.** The engine sees which writer shards a query matched
+  in, and repeated searches for the same pair are linkable.
+- **Series cardinality and scrape timing**, as before.
+- **Prototype shortcut:** all roles derive the HICKAE authority from one shared
+  seed, so the engine can derive secrets a real untrusted server must not hold.
+  Only the public correlation matrix is actually used. Fixing this means
+  serializing per-role key material in hermes-go.
+
+**Not yet done:** the encrypted index is in-memory only (no WAL, no replay), so
+the targets must be restarted whenever Prometheus is. Epoch advancement, and the
+forward privacy it buys, is unused.
+
 ## One-line summary
 
 Build a **fork of Prometheus** that plays the untrusted-server role for a single
 instance: reuse the read/write plumbing and the inverted index as seams, but
 fork the sample-value representation, chunk encoding, aggregation semantics, and
-selector-privacy boundary. Keys and all final decisions (thresholds, alerts)
+selector-privacy boundary. Values are TimeCrypt ciphertext; label pairs live in
+a Hermes encrypted index inside the server, reached through a reserved matcher. Keys and all final decisions (thresholds, alerts)
 live only in a trusted client/evaluator.

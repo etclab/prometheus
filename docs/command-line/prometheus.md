@@ -27,6 +27,9 @@ The Prometheus monitoring server
 | <code class="text-nowrap">--web.user-assets</code> | Path to static asset directory, available at /user. |  |
 | <code class="text-nowrap">--web.enable-lifecycle</code> | Enable shutdown and reload via HTTP request. | `false` |
 | <code class="text-nowrap">--web.enable-admin-api</code> | Enable API endpoints for admin control actions. | `false` |
+| <code class="text-nowrap">--hermes.enabled</code> | Enable the Hermes encrypted inverted index, so scrape targets can index encrypted label pairs and queries can search them. Experimental. | `false` |
+| <code class="text-nowrap">--hermes.keys-dir</code> | Directory holding the Hermes seed file, shared with the scrape targets and the rule evaluator. | `research/keys` |
+| <code class="text-nowrap">--hermes.writers</code> | Number of Hermes writer classes to provision. Must match the value the writers and the rule evaluator derive their keys with. | `4` |
 | <code class="text-nowrap">--web.enable-remote-write-receiver</code> | Enable API endpoint accepting remote write requests. | `false` |
 | <code class="text-nowrap">--web.remote-write-receiver.accepted-protobuf-messages</code> | List of the remote write protobuf messages to accept when receiving the remote writes. Supported values: prometheus.WriteRequest, io.prometheus.write.v2.Request | `prometheus.WriteRequest` |
 | <code class="text-nowrap">--web.enable-otlp-receiver</code> | Enable API endpoint accepting OTLP write requests. | `false` |

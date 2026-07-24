@@ -175,6 +175,12 @@ func splitRule(p parser.Parser, r rulefmt.Rule, streams map[string]*encStream) (
 			metric = m.Value
 			continue
 		}
+		// Every matcher becomes a Hermes keyword search, and Hermes searches an
+		// exact keyword: there is no encrypted equivalent of scanning a label's
+		// values for a regex or a negation.
+		if m.Type != labels.MatchEqual {
+			return alertRule{}, fmt.Errorf("matcher %s: encrypted search supports equality only", m)
+		}
 		matchers = append(matchers, m)
 	}
 	st, ok := streams[metric]

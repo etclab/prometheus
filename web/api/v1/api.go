@@ -55,6 +55,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/storage/remote"
 	"github.com/prometheus/prometheus/tsdb"
+	"github.com/prometheus/prometheus/tsdb/hermes"
 	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/prometheus/prometheus/util/annotations"
 	"github.com/prometheus/prometheus/util/features"
@@ -265,6 +266,12 @@ type API struct {
 	openAPIBuilder  *OpenAPIBuilder
 
 	parser parser.Parser
+
+	// atp: how does exposing a writer-facing epoch/update endpoint change the threat model?
+	// hermesIndex is the encrypted inverted index, nil unless it was enabled at
+	// startup. It serves the writer-facing epoch/update endpoints and is bound
+	// into the request context of queries carrying an encrypted search.
+	hermesIndex *hermes.Index
 }
 
 // NewAPI returns an initialized API type.
@@ -310,6 +317,7 @@ func NewAPI(
 	featureRegistry features.Collector,
 	openAPIOptions OpenAPIOptions,
 	promqlParser parser.Parser,
+	hermesIndex *hermes.Index,
 ) *API {
 	a := &API{
 		QueryEngine:       qe,
@@ -345,6 +353,7 @@ func NewAPI(
 		featureRegistry:     featureRegistry,
 		openAPIBuilder:      NewOpenAPIBuilder(openAPIOptions, logger),
 		parser:              promqlParser,
+		hermesIndex:         hermesIndex,
 
 		remoteReadHandler: remote.NewReadHandler(logger, registerer, q, configFunc, remoteReadSampleLimit, remoteReadConcurrencyLimit, remoteReadMaxBytesInFrame),
 	}
@@ -439,6 +448,9 @@ func (api *API) Register(r *route.Router) {
 	r.Post("/query_range", wrapAgent(api.queryRange))
 	r.Get("/query_exemplars", wrapAgent(api.queryExemplars))
 	r.Post("/query_exemplars", wrapAgent(api.queryExemplars))
+
+	r.Get("/hermes/epoch", wrapAgent(api.hermesEpoch))
+	r.Post("/hermes/update", wrapAgent(api.hermesUpdate))
 
 	r.Get("/format_query", wrapAgent(api.formatQuery))
 	r.Post("/format_query", wrapAgent(api.formatQuery))
@@ -556,6 +568,16 @@ func (api *API) query(r *http.Request) (result apiFuncResult) {
 	}()
 
 	ctx = httputil.ContextFromRequest(ctx, r)
+
+	// Carry any encrypted searches into the query path, where the storage layer
+	// resolves them against the encrypted index instead of the plaintext one.
+	bindings, err := api.hermesBindings(r)
+	if err != nil {
+		return apiFuncResult{nil, &apiError{hermesErrorType(err), err}, nil, nil}
+	}
+	if bindings != nil {
+		ctx = hermes.Bind(ctx, bindings)
+	}
 
 	res := qry.Exec(ctx)
 	if res.Err != nil {
@@ -680,6 +702,16 @@ func (api *API) queryRange(r *http.Request) (result apiFuncResult) {
 	}()
 
 	ctx = httputil.ContextFromRequest(ctx, r)
+
+	// Carry any encrypted searches into the query path, where the storage layer
+	// resolves them against the encrypted index instead of the plaintext one.
+	bindings, err := api.hermesBindings(r)
+	if err != nil {
+		return apiFuncResult{nil, &apiError{hermesErrorType(err), err}, nil, nil}
+	}
+	if bindings != nil {
+		ctx = hermes.Bind(ctx, bindings)
+	}
 
 	res := qry.Exec(ctx)
 	if res.Err != nil {

@@ -22,6 +22,14 @@
 // with research/configs/prometheus-timecrypt.yml, which omits rule_files and
 // alertmanagers). Firing alerts are only logged; Alertmanager delivery is out of
 // scope for now, exactly as in the plaintext evaluator.
+//
+// Two label planes are supported, selected with -hermes. By default the rule's
+// matchers become encrypted Hermes searches, so the server resolves the selector
+// without learning a (label, value) pair. With -hermes=false the matchers are
+// sent as an ordinary PromQL selector and only the values remain encrypted: the
+// TimeCrypt-only configuration, which isolates the HEAC path for study. The whole
+// switch is the windowFetcher seam in eval.go; nothing about decryption or
+// aggregation changes between them.
 package main
 
 import (
@@ -30,11 +38,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
-
-	api "github.com/prometheus/client_golang/api"
-	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 )
 
 func main() {
@@ -42,11 +48,12 @@ func main() {
 	rulesFile := flag.String("rules", "research/configs/alerts.yml", "alerting-rule file to evaluate")
 	keysDir := flag.String("keys-dir", "research/keys", "directory holding the TimeCrypt manifest and master seeds")
 	evalInterval := flag.Duration("eval-interval", 15*time.Second, "how often to evaluate the rules")
+	hermesOn := flag.Bool("hermes", true, "select series through the Hermes encrypted index; with -hermes=false the rule's matchers are sent to Prometheus as an ordinary PromQL selector and only the values stay TimeCrypt-encrypted (Prometheus must then run without --hermes.enabled, and the targets without -hermes)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	streams, err := loadStreams(*keysDir)
+	streams, hermesCfg, err := loadStreams(*keysDir)
 	if err != nil {
 		logger.Error("loading TimeCrypt streams", "err", err)
 		os.Exit(1)
@@ -62,20 +69,36 @@ func main() {
 		os.Exit(1)
 	}
 
-	client, err := api.NewClient(api.Config{Address: *prometheusURL})
-	if err != nil {
-		logger.Error("building Prometheus client", "err", err)
-		os.Exit(1)
+	// The label plane: with Hermes on, this process is the only party that can
+	// turn a matcher into a search; with it off, matchers travel in the clear and
+	// only the TimeCrypt value plane is encrypted.
+	var fetcher windowFetcher
+	if *hermesOn {
+		seed, err := os.ReadFile(filepath.Join(*keysDir, hermesCfg.SeedFile))
+		if err != nil {
+			logger.Error("reading Hermes seed", "err", err)
+			os.Exit(1)
+		}
+		if fetcher, err = newHermesReader(seed, hermesCfg.NumWriters, *prometheusURL); err != nil {
+			logger.Error("building Hermes reader", "err", err)
+			os.Exit(1)
+		}
+	} else {
+		var err error
+		if fetcher, err = newPlainFetcher(*prometheusURL, logger); err != nil {
+			logger.Error("building Prometheus client", "err", err)
+			os.Exit(1)
+		}
 	}
 
-	ev := newEvaluator(rules, v1.NewAPI(client), logger)
+	ev := newEvaluator(rules, fetcher, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	logger.Info("starting TimeCrypt evaluator",
 		"prometheus", *prometheusURL, "rules", *rulesFile,
-		"keys_dir", *keysDir, "eval_interval", *evalInterval)
+		"keys_dir", *keysDir, "eval_interval", *evalInterval, "hermes", *hermesOn)
 
 	ticker := time.NewTicker(*evalInterval)
 	defer ticker.Stop()

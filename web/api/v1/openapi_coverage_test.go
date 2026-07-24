@@ -187,6 +187,8 @@ func TestOpenAPICoverage(t *testing.T) {
 		"/*path:OPTIONS":          true, // Wildcard OPTIONS handler.
 		"/openapi.yaml:GET":       true, // Self-referential endpoint.
 		"/notifications/live:GET": true, // SSE endpoint (version-specific).
+		"/hermes/epoch:GET":       true, // Experimental encrypted-index endpoint.
+		"/hermes/update:POST":     true, // Experimental encrypted-index endpoint.
 	}
 
 	for _, route := range routes {

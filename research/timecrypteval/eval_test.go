@@ -17,8 +17,6 @@ import (
 	"time"
 
 	timecrypt "github.com/aashutoshpaudyal/timecrypt-go"
-	api "github.com/prometheus/client_golang/api"
-	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/prometheus/model/rulefmt"
@@ -31,9 +29,15 @@ const (
 	testScale  = 1000.0
 	testMod    = 32
 	testDepth  = 20
+	// testWriters keeps the trusted setup small: Prep is O(n^2).
+	testWriters = 2
 	// seriesLabels is the non-name label set shared by the value and timeID
-	// series, so they pair by identity after __name__ is stripped.
-	seriesLabels = `"instance":"localhost:2112","job":"myapp"`
+	// series, so they pair by identity after __name__ is stripped. Encrypted
+	// series carry nothing but their opaque id.
+	seriesLabels = `"sid":"a3f1c208deadbeef"`
+	// plainLabels is what the same series carries with Hermes off: the ordinary
+	// labels Prometheus attaches to any scrape target.
+	plainLabels = `"job":"myapp","instance":"localhost:2112"`
 )
 
 // writeManifest writes a one-stream manifest + master seed into dir, matching
@@ -41,8 +45,11 @@ const (
 func writeManifest(t *testing.T, dir string, master []byte) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "s.key"), master, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "hermes.seed"), []byte("test-hermes-seed"), 0o600))
 	manifest := `{"streams":[{"metric":"` + testMetric + `","key_file":"s.key","timeid_metric":"` +
-		testTimeID + `","scale":1000,"mod_bits":32,"tree_depth":20}]}`
+		testTimeID + `","scale":1000,"mod_bits":32,"tree_depth":20}],` +
+		`"hermes":{"seed_file":"hermes.seed","num_writers":` + strconv.Itoa(testWriters) +
+		`,"writers":{"localhost:2112":0}}}`
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(manifest), 0o644))
 }
 
@@ -62,7 +69,7 @@ func setup(t *testing.T) (map[string]*encStream, *timecrypt.TimeCryptEncryptionB
 	master, err := timecrypt.GenerateKey(16)
 	require.NoError(t, err)
 	writeManifest(t, keysDir, master)
-	streams, err := loadStreams(keysDir)
+	streams, _, err := loadStreams(keysDir)
 	require.NoError(t, err)
 	return streams, newClientScheme(t, master)
 }
@@ -130,6 +137,11 @@ func (c *captureHandler) WithGroup(string) slog.Handler            { return c }
 func stubProm(t *testing.T, route func(q string) (string, bool)) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/hermes/epoch" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"status":"success","data":{"epoch":"","epochNumber":1,"numWriters":2}}`)
+			return
+		}
 		q := r.FormValue("query")
 		body, ok := route(q)
 		if !ok {
@@ -144,6 +156,12 @@ func stubProm(t *testing.T, route func(q string) (string, bool)) *httptest.Serve
 	return srv
 }
 
+// encSearchSelector is the selector the evaluator builds for a rule with no
+// matchers beyond its metric name: a single encrypted search, "q0".
+func encSearchSelector(metric string) string {
+	return metric + `{__hermes__="q0"}[1m]`
+}
+
 // sampleValues renders a range-vector's [ts,"val"] pairs, one every 10s from base.
 func sampleValues(base time.Time, vals []float64) string {
 	parts := make([]string, len(vals))
@@ -155,17 +173,29 @@ func sampleValues(base time.Time, vals []float64) string {
 }
 
 func matrixBody(name, values string) string {
-	return fmt.Sprintf(`{"status":"success","data":{"resultType":"matrix","result":[{"metric":{"__name__":%q,%s},"values":%s}]}}`, name, seriesLabels, values)
+	return matrixBodyWith(name, seriesLabels, values)
+}
+
+func matrixBodyWith(name, lbls, values string) string {
+	return fmt.Sprintf(`{"status":"success","data":{"resultType":"matrix","result":[{"metric":{"__name__":%q,%s},"values":%s}]}}`, name, lbls, values)
 }
 
 // runOnce runs the evaluator over one rule against srv and returns the captured
 // firing records.
 func runOnce(t *testing.T, ar alertRule, srvURL string) []firedRecord {
 	t.Helper()
-	cap := &captureHandler{}
-	client, err := api.NewClient(api.Config{Address: srvURL})
+	hr, err := newHermesReader([]byte("test-hermes-seed"), testWriters, srvURL)
 	require.NoError(t, err)
-	ev := newEvaluator([]alertRule{ar}, v1.NewAPI(client), slog.New(cap))
+	return runOnceWith(t, ar, hr)
+}
+
+// runOnceWith runs one rule through a given fetcher, capturing the firing
+// records. The two fetchers differ only in how the window is selected, so the
+// same rule and the same ciphertext must produce the same alert through either.
+func runOnceWith(t *testing.T, ar alertRule, f windowFetcher) []firedRecord {
+	t.Helper()
+	cap := &captureHandler{}
+	ev := newEvaluator([]alertRule{ar}, f, slog.New(cap))
 	ev.evalOnce(context.Background(), time.Now())
 	cap.mu.Lock()
 	defer cap.mu.Unlock()
@@ -184,9 +214,9 @@ func TestDeltaAlertOverCiphertext(t *testing.T) {
 
 	srv := stubProm(t, func(q string) (string, bool) {
 		switch q {
-		case testMetric + "[1m]":
+		case encSearchSelector(encSeriesMetric):
 			return matrixBody(testMetric, sampleValues(base, resid)), true
-		case testTimeID + "[1m]":
+		case encSearchSelector(encTimeIDMetric):
 			return matrixBody(testTimeID, sampleValues(base, ids)), true
 		}
 		return "", false
@@ -194,6 +224,38 @@ func TestDeltaAlertOverCiphertext(t *testing.T) {
 
 	ar := mustSplit(t, streams, "MyappOpsDecreasing", "delta("+testMetric+"[1m]) < 0")
 	fired := runOnce(t, ar, srv.URL)
+
+	require.Len(t, fired, 1)
+	require.Equal(t, "MyappOpsDecreasing", fired[0].alert)
+	require.InDelta(t, -6.0, fired[0].value, 1e-6)
+}
+
+// TestDeltaAlertWithoutHermes is the same end-to-end alert with the encrypted
+// label plane turned off (-hermes=false): the rule is selected with an ordinary
+// PromQL selector over the real metric names, and only the values are still HEAC
+// ciphertext. The decrypted value must match TestDeltaAlertOverCiphertext
+// exactly, which is what makes the two modes comparable.
+func TestDeltaAlertWithoutHermes(t *testing.T) {
+	streams, enc := setup(t)
+	base := time.Now().Add(-time.Minute).Truncate(time.Second)
+	resid := encodeValues(t, enc, []float64{10, 9, 7, 4}) // net change -6.
+	ids := []float64{0, 1, 2, 3}
+
+	srv := stubProm(t, func(q string) (string, bool) {
+		switch q {
+		case testMetric + "[1m]":
+			return matrixBodyWith(testMetric, plainLabels, sampleValues(base, resid)), true
+		case testTimeID + "[1m]":
+			return matrixBodyWith(testTimeID, plainLabels, sampleValues(base, ids)), true
+		}
+		return "", false
+	})
+
+	pf, err := newPlainFetcher(srv.URL, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	require.NoError(t, err)
+
+	ar := mustSplit(t, streams, "MyappOpsDecreasing", "delta("+testMetric+"[1m]) < 0")
+	fired := runOnceWith(t, ar, pf)
 
 	require.Len(t, fired, 1)
 	require.Equal(t, "MyappOpsDecreasing", fired[0].alert)
@@ -210,9 +272,9 @@ func TestDeltaDoesNotFireWhenIncreasing(t *testing.T) {
 
 	srv := stubProm(t, func(q string) (string, bool) {
 		switch q {
-		case testMetric + "[1m]":
+		case encSearchSelector(encSeriesMetric):
 			return matrixBody(testMetric, sampleValues(base, resid)), true
-		case testTimeID + "[1m]":
+		case encSearchSelector(encTimeIDMetric):
 			return matrixBody(testTimeID, sampleValues(base, ids)), true
 		}
 		return "", false
@@ -234,9 +296,9 @@ func TestSumOverTimeLocalAggregation(t *testing.T) {
 
 	srv := stubProm(t, func(q string) (string, bool) {
 		switch q {
-		case testMetric + "[1m]":
+		case encSearchSelector(encSeriesMetric):
 			return matrixBody(testMetric, sampleValues(base, resid)), true
-		case testTimeID + "[1m]":
+		case encSearchSelector(encTimeIDMetric):
 			return matrixBody(testTimeID, sampleValues(base, ids)), true
 		}
 		return "", false

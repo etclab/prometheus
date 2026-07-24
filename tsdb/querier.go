@@ -263,7 +263,31 @@ func selectChunkSeriesSet(ctx context.Context, sortSeries bool, hints *storage.S
 
 // PostingsForMatchers assembles a single postings iterator against the index reader
 // based on the given matchers. The resulting postings are not ordered by series.
+//
+// Matchers on the reserved hermes.MatcherName label are resolved against the
+// encrypted index instead of the plaintext one, and the postings they yield are
+// intersected with those of the remaining matchers — so an encrypted lookup
+// composes with ordinary label matching rather than bypassing it.
 func PostingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matcher) (index.Postings, error) {
+	hermesIts, ms, err := hermesPostings(ctx, ix, ms)
+	if err != nil {
+		return nil, err
+	}
+	if len(hermesIts) > 0 {
+		if len(ms) == 0 {
+			return index.Intersect(hermesIts...), nil
+		}
+		p, err := postingsForMatchers(ctx, ix, ms...)
+		if err != nil {
+			return nil, err
+		}
+		return index.Intersect(append(hermesIts, p)...), nil
+	}
+	return postingsForMatchers(ctx, ix, ms...)
+}
+
+// postingsForMatchers is PostingsForMatchers over plaintext label matchers only.
+func postingsForMatchers(ctx context.Context, ix IndexReader, ms ...*labels.Matcher) (index.Postings, error) {
 	if len(ms) == 1 && ms[0].Name == "" && ms[0].Value == "" {
 		k, v := index.AllPostingsKey()
 		return ix.Postings(ctx, k, v)

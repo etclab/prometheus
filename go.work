@@ -1,9 +1,10 @@
-go 1.25.0
+go 1.25.7
 
 use (
 	.
 	./clusion-go
 	./timecrypt-go
+	../Hermes/hermes-go
 	./compliance
 	./documentation/examples/remote_storage
 	./internal/tools

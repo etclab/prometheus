@@ -59,6 +59,7 @@ import (
 	"github.com/prometheus/prometheus/scrape"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/template"
+	"github.com/prometheus/prometheus/tsdb/hermes"
 	"github.com/prometheus/prometheus/util/features"
 	"github.com/prometheus/prometheus/util/httputil"
 	"github.com/prometheus/prometheus/util/netconnlimit"
@@ -322,6 +323,10 @@ type Options struct {
 
 	// Parser is the PromQL parser used for parsing query expressions.
 	Parser parser.Parser
+
+	// HermesIndex is the encrypted inverted index, nil unless it was enabled at
+	// startup.
+	HermesIndex *hermes.Index
 }
 
 // New initializes a new web Handler.
@@ -439,6 +444,7 @@ func New(logger *slog.Logger, o *Options) *Handler {
 			MaxSearchLimit: o.MaxSearchLimit,
 		},
 		o.Parser,
+		o.HermesIndex,
 	)
 
 	if r := o.FeatureRegistry; r != nil {

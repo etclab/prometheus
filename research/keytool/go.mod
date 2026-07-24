@@ -1,6 +1,6 @@
 module keytool
 
-go 1.25.0
+go 1.25.7
 
 require github.com/aashutoshpaudyal/timecrypt-go v0.0.0
 

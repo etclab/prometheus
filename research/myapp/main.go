@@ -18,6 +18,12 @@
 // collector: each scrape encrypts the current plaintext value at the next
 // contiguous timeID, so the value and its timeID can never desync and the
 // evaluator's window aggregates line up with the key-regression tree.
+//
+// Those are the series names of the TimeCrypt-only mode (-hermes=false). By
+// default the label pairs are encrypted too: the same two series are then
+// exposed as enc_series{sid=...} / enc_series_timeid{sid=...} and their real
+// names and labels are indexed into Prometheus's Hermes index instead (see
+// hermes.go). The value plane is identical in both modes.
 package main
 
 import (
@@ -48,14 +54,22 @@ type stream struct {
 	TreeDepth    int     `json:"tree_depth"`
 }
 
+// hermesConfig mirrors the manifest's hermes block written by research/keytool.
+type hermesConfig struct {
+	SeedFile   string         `json:"seed_file"`
+	NumWriters int            `json:"num_writers"`
+	Writers    map[string]int `json:"writers"`
+}
+
 type manifest struct {
-	Streams []stream `json:"streams"`
+	Streams []stream     `json:"streams"`
+	Hermes  hermesConfig `json:"hermes"`
 }
 
 // loadStream reads the manifest + master seed for one metric and builds the
 // HEAC encryption scheme for it.
 // TODO: HOMAC isn't added yet?
-func loadStream(keysDir, metric string) (stream, *timecrypt.TimeCryptEncryptionBI) {
+func loadStream(keysDir, metric string) (stream, hermesConfig, *timecrypt.TimeCryptEncryptionBI) {
 	blob, err := os.ReadFile(filepath.Join(keysDir, "manifest.json"))
 	if err != nil {
 		log.Fatalf("myapp: reading manifest: %v (did you run keytool?)", err)
@@ -77,10 +91,10 @@ func loadStream(keysDir, metric string) (stream, *timecrypt.TimeCryptEncryptionB
 		if err != nil {
 			log.Fatalf("myapp: building stream key manager: %v", err)
 		}
-		return s, timecrypt.NewTimeCryptEncryptionBI(skm.TreeKeyRegression(), s.ModBits)
+		return s, m.Hermes, timecrypt.NewTimeCryptEncryptionBI(skm.TreeKeyRegression(), s.ModBits)
 	}
 	log.Fatalf("myapp: metric %q not found in manifest", metric)
-	return stream{}, nil
+	return stream{}, hermesConfig{}, nil
 }
 
 // encCollector owns the plaintext value and emits its encryption on scrape.
@@ -101,12 +115,30 @@ type encCollector struct {
 	timeIDDesc *prometheus.Desc
 }
 
-func newEncCollector(s stream, enc *timecrypt.TimeCryptEncryptionBI) *encCollector {
+// newEncCollector builds the encrypted collector.
+//
+// With a sid (Hermes on) both series are exposed under generic metric names
+// carrying nothing but that opaque series id: the real metric name and labels
+// travel only as Hermes keywords, so Prometheus stores no plaintext label pair
+// for this series.
+//
+// An empty sid is the TimeCrypt-only mode: the series keep their real names and
+// their labels are left to Prometheus as usual, so only the values are
+// encrypted. The HEAC ciphertext and its timeID companion are identical either
+// way — the sid changes what the series is *called*, never what it carries.
+func newEncCollector(s stream, enc *timecrypt.TimeCryptEncryptionBI, sid string) *encCollector {
+	valueName, timeIDName := encSeriesMetric, encTimeIDMetric
+	var sidLabels prometheus.Labels
+	if sid == "" {
+		valueName, timeIDName = s.Metric, s.TimeIDMetric
+	} else {
+		sidLabels = prometheus.Labels{sidLabel: sid}
+	}
 	return &encCollector{
 		enc:        enc,
 		scale:      s.Scale,
-		valueDesc:  prometheus.NewDesc(s.Metric, "TimeCrypt (HEAC) ciphertext of the processed-ops gauge; decrypts client-side.", nil, nil),
-		timeIDDesc: prometheus.NewDesc(s.TimeIDMetric, "HEAC time index (key id) of the current myapp_processed_ops ciphertext.", nil, nil),
+		valueDesc:  prometheus.NewDesc(valueName, "TimeCrypt (HEAC) ciphertext of an encrypted series; decrypts client-side.", nil, sidLabels),
+		timeIDDesc: prometheus.NewDesc(timeIDName, "HEAC time index (key id) of the current ciphertext sample.", nil, sidLabels),
 	}
 }
 
@@ -174,25 +206,62 @@ func (c *encCollector) Collect(ch chan<- prometheus.Metric) {
 func main() {
 	keysDir := flag.String("keys-dir", "research/keys", "directory holding the TimeCrypt manifest and master seeds")
 	addr := flag.String("addr", ":2112", "address to serve /metrics on")
+	target := flag.String("target", "localhost:2112", "this target's identity: its writer class is looked up under this key in the manifest, and it is indexed as the instance label")
+	prometheusURL := flag.String("prometheus-url", "http://localhost:9090", "base URL of the Prometheus hosting the encrypted index")
 	plaintext := flag.Bool("plaintext", false, "expose myapp_processed_ops as a plain gauge (no TimeCrypt); used with the plaintext rule evaluator")
+	hermesOn := flag.Bool("hermes", true, "index this target's (label, value) pairs into Prometheus's Hermes index and expose the series under an opaque id; with -hermes=false the series keeps its real name and labels and only its values are TimeCrypt-encrypted")
 	flag.Parse()
 
 	reg := prometheus.NewRegistry()
 	var c *encCollector
 	if *plaintext {
 		c = newPlainCollector()
+	} else if !*hermesOn {
+		// TimeCrypt only: the values are still HEAC ciphertext, but the series is
+		// exposed under its real name and Prometheus labels it as it labels any
+		// other target.
+		s, _, enc := loadStream(*keysDir, "myapp_processed_ops")
+		c = newEncCollector(s, enc, "")
 	} else {
-		s, enc := loadStream(*keysDir, "myapp_processed_ops")
-		c = newEncCollector(s, enc)
+		s, hc, enc := loadStream(*keysDir, "myapp_processed_ops")
+
+		// The label set this target owns. It never leaves the process as
+		// plaintext: every pair is encrypted into the Hermes index, and the
+		// series itself is exposed carrying only the id derived from it.
+		lset := map[string]string{
+			"__name__": s.Metric,
+			"job":      "myapp",
+			"instance": *target,
+		}
+
+		wid, ok := hc.Writers[*target]
+		if !ok {
+			log.Fatalf("myapp: target %q has no writer class in the manifest", *target)
+		}
+		seed, err := os.ReadFile(filepath.Join(*keysDir, hc.SeedFile))
+		if err != nil {
+			log.Fatalf("myapp: reading Hermes seed: %v (did you run keytool?)", err)
+		}
+		hw, err := newHermesWriter(seed, wid, hc.NumWriters, *prometheusURL)
+		if err != nil {
+			log.Fatalf("myapp: building Hermes writer: %v", err)
+		}
+		docID, sid := hw.seriesID(lset)
+
+		c = newEncCollector(s, enc, sid)
+		go hw.indexWithRetry(lset, docID)
 	}
 	reg.MustRegister(c)
 	go c.walk()
 
 	http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
-	if *plaintext {
+	switch {
+	case *plaintext:
 		log.Printf("myapp: serving plaintext metrics on %s", *addr)
-	} else {
-		log.Printf("myapp: serving encrypted metrics on %s (keys from %s)", *addr, *keysDir)
+	case *hermesOn:
+		log.Printf("myapp: serving encrypted metrics on %s as %s (keys from %s)", *addr, *target, *keysDir)
+	default:
+		log.Printf("myapp: serving TimeCrypt-encrypted values on %s under plaintext labels, Hermes off (keys from %s)", *addr, *keysDir)
 	}
 	log.Fatal(http.ListenAndServe(*addr, nil))
 }

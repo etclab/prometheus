@@ -191,6 +191,7 @@ type flagConfig struct {
 	resendDelay                 model.Duration
 	maxConcurrentEvals          int64
 	web                         web.Options
+	hermes                      hermesOptions
 	scrape                      scrape.Options
 	tsdb                        tsdbOptions
 	agent                       agentOptions
@@ -451,6 +452,15 @@ func main() {
 
 	a.Flag("web.enable-admin-api", "Enable API endpoints for admin control actions.").
 		Default("false").BoolVar(&cfg.web.EnableAdminAPI)
+
+	a.Flag("hermes.enabled", "Enable the Hermes encrypted inverted index, so scrape targets can index encrypted label pairs and queries can search them. Experimental.").
+		Default("false").BoolVar(&cfg.hermes.enabled)
+
+	a.Flag("hermes.keys-dir", "Directory holding the Hermes seed file, shared with the scrape targets and the rule evaluator.").
+		Default("research/keys").StringVar(&cfg.hermes.keysDir)
+
+	a.Flag("hermes.writers", "Number of Hermes writer classes to provision. Must match the value the writers and the rule evaluator derive their keys with.").
+		Default("4").IntVar(&cfg.hermes.numWriters)
 
 	// TODO(bwplotka): Consider allowing those remote receive flags to be changed in config.
 	// See https://github.com/prometheus/prometheus/issues/14410
@@ -715,6 +725,12 @@ func main() {
 	cfg.web.CORSOrigin, err = compileCORSRegexString(cfg.corsRegexString)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, fmt.Errorf("could not compile CORS regex string %q: %w", cfg.corsRegexString, err))
+		os.Exit(2)
+	}
+
+	cfg.web.HermesIndex, err = buildHermesIndex(cfg.hermes)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, fmt.Errorf("could not build the Hermes encrypted index: %w", err))
 		os.Exit(2)
 	}
 

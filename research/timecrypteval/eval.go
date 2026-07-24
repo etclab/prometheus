@@ -8,14 +8,24 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
-	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 
 	"github.com/prometheus/prometheus/model/labels"
 )
+
+// windowFetcher selects one rule's window of raw ciphertext from Prometheus and
+// returns the value series together with its timeID companion. It is the seam
+// between the two label planes: hermesReader turns the rule's matchers into
+// encrypted searches over opaque series ids, while plainFetcher sends an ordinary
+// PromQL selector naming the metric and its labels in the clear. Both return the
+// same TimeCrypt ciphertext; only the selection path differs.
+//
+// The returned matrices are freshly decoded per call; the caller owns them.
+type windowFetcher interface {
+	fetchWindow(ctx context.Context, r alertRule, t time.Time) (values, timeids model.Matrix, err error)
+}
 
 // evaluator runs the split rules on an interval. For each rule it fetches the
 // full range of raw ciphertext from Prometheus (which only ever stores and
@@ -24,21 +34,21 @@ import (
 // Delivery to Alertmanager is intentionally out of scope: firing alerts are only
 // logged (matching research/plaintexteval's log-only default).
 type evaluator struct {
-	rules  []alertRule
-	api    v1.API
-	logger *slog.Logger
+	rules   []alertRule
+	fetcher windowFetcher
+	logger  *slog.Logger
 
 	// active maps a (rule, series) key to the time the series first breached,
 	// implementing the `for` pending->firing transition.
 	active map[string]time.Time
 }
 
-func newEvaluator(rules []alertRule, api v1.API, logger *slog.Logger) *evaluator {
+func newEvaluator(rules []alertRule, f windowFetcher, logger *slog.Logger) *evaluator {
 	return &evaluator{
-		rules:  rules,
-		api:    api,
-		logger: logger,
-		active: map[string]time.Time{},
+		rules:   rules,
+		fetcher: f,
+		logger:  logger,
+		active:  map[string]time.Time{},
 	}
 }
 
@@ -203,11 +213,7 @@ type seriesPoints struct {
 // companion over the window, and pairs them per series. This is the selection +
 // windowing that Prometheus can always do over encrypted data.
 func (e *evaluator) fetchPaired(ctx context.Context, r alertRule, now time.Time) (map[uint64]seriesPoints, error) {
-	vm, err := e.queryMatrix(ctx, selector(r.stream.metric, r.matchers, r.window), now)
-	if err != nil {
-		return nil, err
-	}
-	tm, err := e.queryMatrix(ctx, selector(r.stream.timeIDMetric, r.matchers, r.window), now)
+	vm, tm, err := e.fetcher.fetchWindow(ctx, r, now)
 	if err != nil {
 		return nil, err
 	}
@@ -225,44 +231,6 @@ func (e *evaluator) fetchPaired(ctx context.Context, r alertRule, now time.Time)
 		out[key] = seriesPoints{metric: vs.metric, points: pts}
 	}
 	return out, nil
-}
-
-// queryMatrix runs an instant query of a range selector expected to return a
-// matrix (range vectors).
-func (e *evaluator) queryMatrix(ctx context.Context, qs string, t time.Time) (model.Matrix, error) {
-	res, warnings, err := e.api.Query(ctx, qs, t)
-	if err != nil {
-		return nil, fmt.Errorf("query %q: %w", qs, err)
-	}
-	for _, w := range warnings {
-		e.logger.Warn("query warning", "query", qs, "warning", w)
-	}
-	m, ok := res.(model.Matrix)
-	if !ok {
-		return nil, fmt.Errorf("query %q returned %s, want matrix", qs, res.Type())
-	}
-	return m, nil
-}
-
-// selector renders a range-vector selector string from a metric name, matchers,
-// and window, e.g. `myapp_processed_ops{job="myapp"}[1m]`.
-func selector(metric string, matchers []*labels.Matcher, window time.Duration) string {
-	var b strings.Builder
-	b.WriteString(metric)
-	if len(matchers) > 0 {
-		b.WriteByte('{')
-		for i, m := range matchers {
-			if i > 0 {
-				b.WriteByte(',')
-			}
-			b.WriteString(m.String())
-		}
-		b.WriteByte('}')
-	}
-	b.WriteByte('[')
-	b.WriteString(model.Duration(window).String())
-	b.WriteByte(']')
-	return b.String()
 }
 
 // atp: I can't read regex and I cannot lie
